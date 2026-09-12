@@ -8,10 +8,12 @@ Design and investigation notes live in [SPEC.md](SPEC.md).
 
 1. Exit to the BTD6 main menu (or close the game).
 2. Click **Save current**, accept the suggested name (for example `Lych Elite T1 · Frozen Over · R59`), press Enter.
-3. Play. When you want to retry, close BTD6, pick the snapshot and click **Load**, confirm.
+3. Play. When you want to retry, close BTD6, pick the snapshot in the left column and click **Load this snapshot**, confirm.
 
-The status dot is green when BTD6 is not running and red when it is. **Load** is disabled
-while the game runs. Names and notes are edited inline in the row.
+The window is a two-column split: snapshots on the left, the selected one on the right with
+its rank, monkey money, game version, and the in-progress games it holds. The status chip in
+the top bar is green when BTD6 is not running and red when it is. **Load** is disabled while
+the game runs. Names and notes are edited inline in the detail pane; Ctrl+S takes a snapshot.
 
 Snapshots are folders under `saves/` next to the executable, each holding `Profile.Save`,
 `MapSaveData` and a `meta.json`. There is no global index, so you can delete or copy
@@ -20,7 +22,7 @@ executable.
 
 Preconditions: Steam build of BTD6, Steam Cloud for BTD6 disabled. The Steam user id is
 fixed in `src-tauri/src/paths.rs`; if `Profile.Save` is not found at startup the app opens
-a settings pane where you can point it at the right file.
+the settings dialog where you can point it at the right file.
 
 ## Develop
 

@@ -129,6 +129,18 @@ fn delete_snapshot(id: String) -> Result<(), String> {
     snapshot::delete(&paths::saves_dir(), &id)
 }
 
+/// Opens the snapshots folder in Explorer.
+#[tauri::command]
+fn open_saves_dir() -> Result<(), String> {
+    let dir = paths::saves_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+    std::process::Command::new("explorer")
+        .arg(&dir)
+        .spawn()
+        .map(|_| ())
+        .map_err(|e| format!("opening {}: {e}", dir.display()))
+}
+
 #[tauri::command]
 fn get_settings(state: State<'_, AppState>) -> Settings {
     state.settings.lock().unwrap().clone()
@@ -199,7 +211,9 @@ pub fn run() {
             let window = app.get_webview_window("main").expect("main window");
             let saved = app.state::<AppState>().settings.lock().unwrap().window;
             if let Some(r) = saved {
-                if rect_on_some_monitor(&window, &r) {
+                // Ignore geometry saved by the old portrait layout; the window would
+                // otherwise reopen smaller than the current minimum size.
+                if r.width >= 800 && r.height >= 600 && rect_on_some_monitor(&window, &r) {
                     let _ = window.set_position(PhysicalPosition::new(r.x, r.y));
                     let _ = window.set_size(PhysicalSize::new(r.width, r.height));
                 }
@@ -227,6 +241,7 @@ pub fn run() {
             delete_snapshot,
             get_settings,
             set_paths,
+            open_saves_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
