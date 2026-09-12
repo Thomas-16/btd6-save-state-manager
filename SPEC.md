@@ -3,7 +3,7 @@
 A small Windows desktop app for making named snapshots of Bloons TD 6 save data and
 restoring them later. Built for one use case: retrying map saves and boss event runs.
 
-Status: design only. Nothing built yet.
+Status: v1 implemented (2026-09-12). Build plan steps 1-7 done; step 8 (in-game round trip) pending.
 
 ---
 
@@ -254,8 +254,11 @@ From the decrypted profile JSON:
 - Boss detection: `playerChallengeId` present and `metaData` contains `BossEventIsElite`.
   Boss name is the leading alphabetic run of `playerChallengeId` (`Lych61_...` -> `Lych`).
   Elite from `BossEventIsElite == "True"`, tier from `BossEventTier`.
-- Row summary picks the most recently played entry. Observed `gameType` values: 0 standard,
-  3 odyssey, 4 boss event. Treat this mapping as provisional and verify during build.
+- Row summary picks the most recently played entry: the one with the highest `gameId`, then
+  highest `attemptId`. `gameId` is a counter that grows across games (1254, 1808, 2144, 2152 in
+  the inspected profile) and `ts` is always null, so this is the only recency signal available.
+  Observed `gameType` values: 0 standard, 3 odyssey, 4 boss event. Whether 4 also covers other
+  event types is still unverified (see section 9).
 - Human map names: strip camel case (`FrozenOver` -> `Frozen Over`). No lookup table in v1.
 
 ---

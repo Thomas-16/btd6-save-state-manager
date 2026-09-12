@@ -1,2 +1,8 @@
 saves/
 tools/out/
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/fixtures/
+settings.json
