@@ -15,7 +15,9 @@ release exe and deploy it. Ask first; do not deploy unprompted. The deploy is:
 
 ## Conventions
 
-- `python` on PATH is the Microsoft Store stub; use `node` for scripting.
+- `python` is real CPython 3.14. Run scripts as `python file.py`, `python -c "..."`, or pipe
+  into `python -`; never bare `python -` (it waits on stdin). `PYTHON_BASIC_REPL=1` is set
+  in the user environment so Python 3.13+ cannot loop in its new REPL on a non-tty stdin.
 - `tools/inspect_save.js` is CommonJS; copy it to a `.cjs` file to run it (package.json is
   `type: module`).
 - Never write decoded save data except through the selective restore in `restore.rs`.
