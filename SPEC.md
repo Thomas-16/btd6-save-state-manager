@@ -3,7 +3,8 @@
 A small Windows desktop app for making named snapshots of Bloons TD 6 save data and
 restoring them later. Built for one use case: retrying map saves and boss event runs.
 
-Status: v1 implemented (2026-09-12). Build plan steps 1-7 done; step 8 (in-game round trip) pending.
+Status: v1 implemented (2026-09-12). Selective restore (step 9) implemented 2026-09-15; its
+in-game round trip is pending.
 
 ---
 
@@ -12,12 +13,12 @@ Status: v1 implemented (2026-09-12). Build plan steps 1-7 done; step 8 (in-game 
 **Goal.** From the BTD6 main menu, click one button, type a name, and get a snapshot.
 Later, with BTD6 closed, pick a snapshot and restore it. That is the whole loop.
 
-**Non-goals for v1.**
-- No editing of save contents. The app never writes decrypted data back.
+**Non-goals.**
+- No free-form editing of save contents. The only write of decoded data is the selective
+  restore (section 3.3), which copies whole values from a snapshot into the live profile.
 - No Epic Games install support. Steam only.
 - No launching BTD6 from the app.
 - No tray icon, always-on-top, or global hotkeys. It is a normal small window.
-- No automatic backup before restore. A confirm dialog is the only safety net.
 - No cloud or NK-account handling.
 
 ---
@@ -32,7 +33,7 @@ Decrypted the live files read-only using the format documented by community tool
 | File | Location | Contents |
 |---|---|---|
 | `Profile.Save` | `C:\Program Files (x86)\Steam\userdata\1276140654\960090\local\link\PRODUCTION\current\` | Whole player profile, encrypted. Includes `savedMaps`, a dictionary of complete in-progress game states. |
-| `MapSaveData` | `%USERPROFILE%\AppData\LocalLow\Ninja Kiwi\BloonsTD6\` | Live autosave of the currently running game, unencrypted zlib. Rewritten every round. Set to `null` (60 bytes) when you exit to the menu. |
+| `MapSaveData` | `%USERPROFILE%\AppData\LocalLow\Ninja Kiwi\BloonsTD6\` | Live autosave of the currently running game, unencrypted zlib. Rewritten every round. Set to `null` (60 bytes) when you exit to the menu. On 2026-09-15 the file was absent altogether (the game had deleted it), so treat it as optional. |
 
 Both directories also hold `.bak` (previous version) and `.tmp` (write-in-progress) siblings
 that the game manages itself. We leave those alone.
@@ -113,6 +114,40 @@ Payload, MapSaveData (not encrypted):
 
 Verified against the live files: both decrypt and parse cleanly.
 
+Encoding (used by the selective restore) is the same pipeline backwards: BOM + compact JSON
+-> zlib level 2 (the game's `78 5E` header) -> fresh random 24-byte salt -> AES-128-CBC/PKCS7
+-> `u64 2` + salt + ciphertext, appended to the live file's header bytes copied verbatim.
+The 32-hex header string is **not** a checksum of the payload: `Profile.Save` and
+`Profile.bak` carry the same string with different payloads, and it changed between days. The
+guid and the 8 unknown bytes were constant across every file inspected.
+
+The decoded JSON is one object with ~249 top-level keys and no whitespace. Numbers are written
+by C# in round-trip format (up to 17 significant digits, thousands of `x.0` literals), so the
+app parses with serde_json `arbitrary_precision` and re-serialises the untouched parts
+byte-for-byte, except that C#'s `1E+08` comes back as `1e+08` (same value; the live-fixture
+test checks this is the only difference).
+
+### 2.6 What the profile holds (inspection 2026-09-15)
+
+Compared the 2026-09-12 snapshot with the live profile after two days of play.
+
+- `savedMaps` is a dictionary keyed by `savedMapsId`: regular map saves by map name (`Cubism`,
+  `Infernal`), the boss run as `BB` plus a continue checkpoint `BBCONT` (same
+  `playerChallengeId`, lower round, its own `savedMapsId` is still `BB`), the odyssey as `OD`.
+  Each entry carries its own `gameVersion`; a 56.1 entry sits happily in a 56.3 profile.
+- Boss event progress is separate: `bossesEventData` is an array of
+  `{eventId, normal: {tierBeaten, highestCompletedRound, ...}, elite: {...}, ...}` where
+  `eventId` equals the run's `playerChallengeId` (`Lych61_mtw1v6de`).
+- Odyssey progress: `odysseySaveData.activeOdysey` (`hasStarted`, `currentOdyseyMapSaveIndex`,
+  `odysseyMapDataHistory`) plus `difficultySaveData`.
+- Currencies and counters: `monkeyMoney`, `xp`, `rank`, `trophies`, `lifetimeTrophies`,
+  `trophiesSpent`, `knowledgePoints`, `veteranXp`, `veteranRank`.
+- Everything else falls into recognisable groups: `mapInfo` (per-map medal bitfields),
+  `towerXp` + unlock lists, `powersData`/`instaTowers`/`trophyStorePurchasedItems`,
+  `achievements*`, daily-challenge and event lists, settings/hotkeys/cosmetics, and
+  `analyticsKonFuze` (69 KB of stats). The full key -> category table lives in
+  `src-tauri/src/restore.rs`; a unit test checks every key seen in the real profile is covered.
+
 ---
 
 ## 3. User-facing behaviour
@@ -140,14 +175,35 @@ Verified against the live files: both decrypt and parse cleanly.
 3. Decrypts the copied `Profile.Save` read-only to validate the copy and fill auto-info.
    If decryption fails the snapshot is kept but flagged "unreadable, may be corrupt".
 
-### 3.3 Load
+### 3.3 Load (selective restore)
 
 1. Disabled while BTD6 is running.
-2. Confirm dialog: "Overwrite your current BTD6 save with '<name>'? This cannot be undone."
-   If the snapshot's game version differs from the live profile's, the dialog adds a warning line.
-3. Writes both files atomically (write to a temp file in the target directory, then rename over
-   the original). `Profile.bak` and `.tmp` are not touched.
-4. Reports success in the row ("Loaded 3 s ago").
+2. The app decrypts the snapshot's profile and the live profile and shows what differs:
+   - **In-progress games**: one checkbox per saved game. A boss run's `BB` + `BBCONT` is one
+     item; `OD` is one item. Status per item: *new* (only in the snapshot), *replaces Rn* (in
+     both, different), *no change*, *kept* (only in the live profile, never removed). Boss and
+     odyssey items get a sub-row for their event progress (the matching `bossesEventData`
+     entry, or `odysseySaveData`). Games and their event progress are ticked by default.
+   - **Also take from snapshot**: one checkbox per category, unticked, with a one-line summary
+     of which keys differ: boss & odyssey records, map completion & medals, tower XP/unlocks/
+     knowledge, powers/insta-monkeys/trophy store, achievements, daily challenges/events/
+     seasons, settings/hotkeys/cosmetics, and "everything else" (stats, editors, any key a new
+     game version adds).
+   - **Always kept**: monkey money is shown with both values and cannot be selected. The same
+     lock applies to XP, rank, trophies, knowledge points and identity keys (`ownerID`,
+     wallets, `savedByGameVersion`, `timeStamp`, ...); those appear only when they differ.
+   - **Advanced**: "Overwrite the entire file instead" is the old byte-for-byte copy. It is the
+     only option when either profile cannot be decoded, and carries the cross-version warning.
+3. Before writing anything, the live files are snapshotted automatically as
+   "Auto backup before <name>" (flagged `auto` in `meta.json`). If that fails, nothing is loaded.
+4. Merge mode starts from the live JSON, replaces the selected keys/entries with the snapshot's,
+   re-copies every locked key from the live profile, re-encrypts with the live file's header,
+   decodes the result as a self-check, then writes atomically. The snapshot's `MapSaveData` is
+   written only when it is a mid-run autosave of a game that was just restored (matched by
+   `savedMapsId` and `gameId`); an idle `null` autosave or one of an unselected run leaves the
+   live file alone. Raw mode writes both files as before.
+   `Profile.bak` and `.tmp` are never touched.
+5. Reports success in the row ("Loaded 3 s ago").
 
 ### 3.4 Rename, edit note, delete
 
@@ -187,7 +243,8 @@ Snapshots live next to the executable. Portable, no AppData.
       "boss": "Lych", "elite": true, "tier": 1, "challengeId": "Lych61_mtw1v6de" }
   ],
   "mapSaveDataPresent": true,
-  "readable": true
+  "readable": true,
+  "auto": false
 }
 ```
 
@@ -222,7 +279,8 @@ cargo 1.94, rustc 1.94, node 24, pnpm 9, WebView2 152.
   - `get_status()` -> running flag, resolved paths, live profile auto-info
   - `list_snapshots()` -> `Vec<Meta>`
   - `create_snapshot(name, note)` -> `Meta`
-  - `restore_snapshot(id)` -> result
+  - `preview_restore(id)` -> `RestorePreview` (games, categories, locked values; read-only)
+  - `restore_snapshot(id, selection)` -> `RestoreReport` (takes the auto backup, then merge or raw)
   - `rename_snapshot(id, name)`, `set_note(id, note)`, `delete_snapshot(id)`
 - Frontend calls `get_status` every 2 s and re-renders the header.
 
@@ -237,8 +295,9 @@ src-tauri/
   src/
     main.rs          tauri setup, command registration
     paths.rs         Steam/LocalLow resolution, process check
-    snapshot.rs      create/restore/rename/delete, atomic writes
-    saveformat.rs    header parse, decrypt, inflate, auto-info extraction
+    snapshot.rs      create/restore/rename/delete, auto backup, atomic writes
+    restore.rs       key categories, preview diff, merge, apply (selective restore)
+    saveformat.rs    header parse, decrypt/encrypt, inflate/deflate, auto-info extraction
 saves/               dev-only snapshot dir, gitignored
 ```
 
@@ -274,6 +333,9 @@ From the decrypted profile JSON:
 6. **Restore** with atomic writes, running-game block, version-mismatch warning.
 7. **Rename / note** inline editing.
 8. **Release build** and a first real round trip: snapshot, play, restore, confirm in game.
+9. **Selective restore**: encoder, key categories, preview dialog, merge + self-check, auto
+   backup, raw escape hatch. Done 2026-09-15; needs its own in-game round trip (load only the
+   boss run from an older snapshot, confirm it resumes and monkey money is untouched).
 
 ---
 

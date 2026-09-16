@@ -8,7 +8,11 @@ Design and investigation notes live in [SPEC.md](SPEC.md).
 
 1. Exit to the BTD6 main menu (or close the game).
 2. Click **Save current**, accept the suggested name (for example `Lych Elite T1 · Frozen Over · R59`), press Enter.
-3. Play. When you want to retry, close BTD6, pick the snapshot in the left column and click **Load this snapshot**, confirm.
+3. Play. When you want to retry, close BTD6, pick the snapshot in the left column and click
+   **Load this snapshot**. A dialog lists what differs: each in-progress game (boss runs with
+   their event progress, odysseys, map saves) is a checkbox, ticked by default; other groups
+   (medals, tower XP, powers, achievements, events, settings, everything else) are unticked;
+   monkey money, XP, rank and trophies are always kept. Tick what you want and apply.
 
 The window is a two-column split: snapshots on the left, the selected one on the right with
 its rank, monkey money, game version, and the in-progress games it holds. The status chip in
@@ -43,13 +47,17 @@ src-tauri/src/
   lib.rs             Tauri setup, commands, window-state persistence
   paths.rs           Steam/LocalLow resolution, running-game check
   settings.rs        settings.json
-  snapshot.rs        create/restore/rename/note/delete, atomic writes
-  saveformat.rs      container header parse, decrypt, inflate, auto-info extraction
-tools/inspect_save.js  read-only Node prototype that dumps a save as JSON
+  snapshot.rs        create/restore/rename/note/delete, auto backup, atomic writes
+  restore.rs         key categories, preview diff, merge and apply for selective loads
+  saveformat.rs      container header parse, decrypt/encrypt, inflate/deflate, auto-info extraction
+tools/inspect_save.js  read-only Node prototype that dumps a save as JSON (copy to .cjs to run)
 ```
 
-The unit test `live_fixtures_if_present` decrypts real files if you copy `Profile.Save`
-and `MapSaveData` into `src-tauri/fixtures/` (gitignored). It is skipped otherwise.
+The unit tests `live_fixtures_if_present` and `live_fixtures_preview_and_merge` use real
+files if you copy `Profile.Save`, `MapSaveData` and an older profile as `Snapshot.Save` into
+`src-tauri/fixtures/` (gitignored). They are skipped otherwise.
 
-The app never writes decrypted data back to the game. Restores copy the original encrypted
-bytes over the live files via a temp file plus rename.
+A load first snapshots the live files automatically ("Auto backup before ..."), then merges
+the selected parts of the snapshot into the live profile, re-encrypts it with a fresh salt,
+decodes the result as a self-check and writes it via a temp file plus rename. The advanced
+"overwrite the entire file" option copies the snapshot's bytes as v1 did.

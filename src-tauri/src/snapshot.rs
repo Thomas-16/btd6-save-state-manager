@@ -34,6 +34,8 @@ pub struct Meta {
     pub map_save_has_game: bool,
     /// The copied `Profile.Save` decrypted and parsed.
     pub readable: bool,
+    /// Taken automatically right before a load, not by the user.
+    pub auto: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -56,6 +58,7 @@ impl Default for Meta {
             map_save_data_present: false,
             map_save_has_game: false,
             readable: false,
+            auto: false,
             error: None,
             last_restored_at: None,
         }
@@ -102,12 +105,12 @@ pub fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     }
 }
 
-fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
+pub(crate) fn write_meta(dir: &Path, meta: &Meta) -> Result<(), String> {
     let json = serde_json::to_vec_pretty(meta).map_err(|e| e.to_string())?;
     atomic_write(&dir.join(META_FILE), &json).map_err(|e| format!("writing meta.json: {e}"))
 }
 
-fn read_meta(dir: &Path) -> Option<Meta> {
+pub(crate) fn read_meta(dir: &Path) -> Option<Meta> {
     let bytes = fs::read(dir.join(META_FILE)).ok()?;
     let mut meta: Meta = serde_json::from_slice(&bytes).ok()?;
     // The folder name is authoritative for the id.
@@ -148,7 +151,7 @@ fn is_safe_id(id: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
-fn snapshot_dir(saves: &Path, id: &str) -> Result<PathBuf, String> {
+pub(crate) fn snapshot_dir(saves: &Path, id: &str) -> Result<PathBuf, String> {
     if !is_safe_id(id) {
         return Err(format!("invalid snapshot id '{id}'"));
     }
@@ -157,6 +160,12 @@ fn snapshot_dir(saves: &Path, id: &str) -> Result<PathBuf, String> {
         return Err(format!("snapshot '{id}' does not exist"));
     }
     Ok(dir)
+}
+
+/// One snapshot's meta by id.
+pub fn get(saves: &Path, id: &str) -> Result<Meta, String> {
+    let dir = snapshot_dir(saves, id)?;
+    read_meta(&dir).ok_or_else(|| "snapshot has no readable meta.json".to_owned())
 }
 
 /// All snapshots, newest first. Folders without a readable `meta.json` are skipped.
@@ -180,6 +189,28 @@ pub fn create(
     map_save_path: &Path,
     name: &str,
     note: &str,
+) -> Result<Meta, String> {
+    create_inner(saves, profile_path, map_save_path, name, note, false)
+}
+
+/// The safety net taken right before a load: a normal snapshot flagged `auto`.
+pub fn create_auto_backup(
+    saves: &Path,
+    profile_path: &Path,
+    map_save_path: &Path,
+    before_name: &str,
+) -> Result<Meta, String> {
+    let name = format!("Auto backup before {}", before_name.trim());
+    create_inner(saves, profile_path, map_save_path, &name, "", true)
+}
+
+fn create_inner(
+    saves: &Path,
+    profile_path: &Path,
+    map_save_path: &Path,
+    name: &str,
+    note: &str,
+    auto: bool,
 ) -> Result<Meta, String> {
     let name = name.trim();
     let name = if name.is_empty() { "Untitled snapshot" } else { name };
@@ -213,6 +244,7 @@ pub fn create(
             note: note.trim().to_owned(),
             created_at: now_utc,
             map_save_data_present: map_save_bytes.is_some(),
+            auto,
             ..Meta::default()
         };
         // Validate the copy, not the in-memory bytes, so a bad write is caught here.
@@ -251,9 +283,19 @@ pub struct RestoreReport {
     pub meta: Meta,
     pub profile_written: String,
     pub map_save_written: Option<String>,
+    /// `"raw"` (whole-file copy) or `"merge"` (selected parts re-encrypted into the live profile).
+    #[serde(default)]
+    pub mode: String,
+    /// Human labels of what was taken from the snapshot (merge mode).
+    #[serde(default)]
+    pub applied: Vec<String>,
+    /// The automatic backup taken right before this restore, when one was made.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup: Option<Meta>,
 }
 
-/// Overwrites the live files with the snapshot's copies. The caller checks the game state.
+/// Overwrites the live files with the snapshot's copies (raw mode). The caller checks the
+/// game state.
 pub fn restore(
     saves: &Path,
     profile_path: &Path,
@@ -284,6 +326,9 @@ pub fn restore(
         meta,
         profile_written: profile_path.display().to_string(),
         map_save_written,
+        mode: "raw".to_owned(),
+        applied: Vec::new(),
+        backup: None,
     })
 }
 
@@ -391,7 +436,17 @@ mod tests {
         assert!(!saveformat::map_save_has_game(&fs::read(&live_map).unwrap()).unwrap());
         assert!(report.map_save_written.is_some());
         assert!(report.meta.last_restored_at.is_some());
+        assert_eq!(report.mode, "raw");
         assert!(!live_profile.with_file_name("Profile.Save.bssm-tmp").exists());
+
+        // Auto backup: flagged, named after the snapshot, holds the live bytes of that moment.
+        let backup = create_auto_backup(&saves, &live_profile, &live_map, "  Lych run ").unwrap();
+        assert!(backup.auto);
+        assert_eq!(backup.name, "Auto backup before Lych run");
+        assert_eq!(fs::read(saves.join(&backup.id).join(PROFILE_FILE)).unwrap(), profile_v1);
+        assert!(list(&saves).iter().any(|m| m.id == backup.id && m.auto));
+        assert_eq!(get(&saves, &backup.id).unwrap().name, backup.name);
+        delete(&saves, &backup.id).unwrap();
 
         // Rename and note persist through a fresh list().
         rename(&saves, &meta.id, "Renamed").unwrap();
@@ -431,5 +486,6 @@ mod tests {
         let partial: Meta = serde_json::from_str(r#"{"id":"a","name":"b"}"#).unwrap();
         assert_eq!(partial.name, "b");
         assert!(!partial.readable);
+        assert!(!partial.auto);
     }
 }

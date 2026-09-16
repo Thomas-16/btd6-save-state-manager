@@ -1,10 +1,12 @@
 //! Tauri setup and the commands exposed to the frontend (SPEC.md section 6).
 
 pub mod paths;
+pub mod restore;
 pub mod saveformat;
 pub mod settings;
 pub mod snapshot;
 
+use restore::{RestorePreview, RestoreSelection};
 use saveformat::ProfileInfo;
 use serde::{Deserialize, Serialize};
 use settings::{Settings, WindowRect};
@@ -100,18 +102,39 @@ fn create_snapshot(state: State<'_, AppState>, name: String, note: String) -> Re
     )
 }
 
+/// What loading a snapshot would change, for the selection dialog. Read-only.
 #[tauri::command]
-fn restore_snapshot(state: State<'_, AppState>, id: String) -> Result<RestoreReport, String> {
+fn preview_restore(state: State<'_, AppState>, id: String) -> Result<RestorePreview, String> {
+    let settings = state.settings.lock().unwrap().clone();
+    restore::preview(&paths::saves_dir(), &settings.profile_path(), &id)
+}
+
+/// Takes an automatic backup of the live files, then applies the selection (merge or raw).
+#[tauri::command]
+fn restore_snapshot(
+    state: State<'_, AppState>,
+    id: String,
+    selection: RestoreSelection,
+) -> Result<RestoreReport, String> {
     if paths::game_running() {
         return Err("BTD6 is running. Close it first.".to_owned());
     }
+    if !selection.raw && selection.is_empty() {
+        return Err("Nothing selected.".to_owned());
+    }
     let settings = state.settings.lock().unwrap().clone();
-    snapshot::restore(
-        &paths::saves_dir(),
-        &settings.profile_path(),
-        &settings.map_save_path(),
-        &id,
-    )
+    let saves = paths::saves_dir();
+    let profile_path = settings.profile_path();
+    let map_save_path = settings.map_save_path();
+    let meta = snapshot::get(&saves, &id)?;
+    let backup = snapshot::create_auto_backup(&saves, &profile_path, &map_save_path, &meta.name)
+        .map_err(|e| format!("automatic backup failed, nothing was loaded: {e}"))?;
+    let result = restore::apply(&saves, &profile_path, &map_save_path, &id, &selection);
+    // The live file changed (or may have); drop the cached decode either way.
+    state.live.lock().unwrap().key = None;
+    let mut report = result?;
+    report.backup = Some(backup);
+    Ok(report)
 }
 
 #[tauri::command]
@@ -235,6 +258,7 @@ pub fn run() {
             get_status,
             list_snapshots,
             create_snapshot,
+            preview_restore,
             restore_snapshot,
             rename_snapshot,
             set_note,

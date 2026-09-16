@@ -1,20 +1,30 @@
-//! Read-only parsing of the BTD6 save container (see SPEC.md section 2.5).
+//! Parsing and encoding of the BTD6 save container (see SPEC.md section 2.5).
 //!
 //! Both `Profile.Save` and `MapSaveData` share one container. The profile payload is
 //! AES-128-CBC encrypted (PBKDF2-HMAC-SHA1 over the password "11") around a zlib stream;
-//! `MapSaveData` is a bare zlib stream. Nothing in here ever writes a save file.
+//! `MapSaveData` is a bare zlib stream. [`encode_profile`] rebuilds an encrypted profile from
+//! JSON for the selective restore; everything else is read-only.
 
-use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, KeyIvInit};
+use aes::cipher::{block_padding::Pkcs7, BlockDecryptMut, BlockEncryptMut, KeyIvInit};
 use flate2::read::ZlibDecoder;
+use flate2::{write::ZlibEncoder, Compression};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
-use std::io::Read;
+use std::io::{Read, Write};
 
 type Aes128CbcDec = cbc::Decryptor<aes::Aes128>;
+type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 
 /// Ticks between 0001-01-01 and 1970-01-01 in .NET DateTime units (100 ns).
 const DOTNET_EPOCH_TICKS: u64 = 621_355_968_000_000_000;
+
+/// Length of the PBKDF2 salt that precedes the ciphertext.
+pub const SALT_LEN: usize = 24;
+/// The game's `passwordIndex`; selects the password "11".
+const PASSWORD_INDEX: u64 = 2;
+/// zlib level the game uses (header bytes `78 5E`).
+const ZLIB_LEVEL: u32 = 2;
 
 #[derive(Debug)]
 pub enum SaveError {
@@ -25,6 +35,7 @@ pub enum SaveError {
     Inflate(std::io::Error),
     Utf8,
     Json(serde_json::Error),
+    Random(String),
 }
 
 impl fmt::Display for SaveError {
@@ -37,6 +48,7 @@ impl fmt::Display for SaveError {
             SaveError::Inflate(e) => write!(f, "zlib inflate failed: {e}"),
             SaveError::Utf8 => write!(f, "payload is not valid UTF-8"),
             SaveError::Json(e) => write!(f, "payload is not valid JSON: {e}"),
+            SaveError::Random(e) => write!(f, "random salt unavailable: {e}"),
         }
     }
 }
@@ -53,6 +65,8 @@ pub struct Container<'a> {
     /// .NET DateTime binary as stored.
     pub timestamp_raw: u64,
     pub header_string: String,
+    /// Everything before the payload, verbatim, so an encoder can reuse it.
+    pub header_bytes: &'a [u8],
     pub payload: &'a [u8],
 }
 
@@ -127,6 +141,7 @@ pub fn parse_container(bytes: &[u8]) -> Result<Container<'_>, SaveError> {
         guid,
         timestamp_raw,
         header_string,
+        header_bytes: &bytes[..payload_start],
         payload,
     })
 }
@@ -172,6 +187,52 @@ pub fn decode_json(bytes: &[u8]) -> Result<String, SaveError> {
         let zlib = decrypt_payload(c.payload)?;
         inflate_to_json(&zlib)
     }
+}
+
+/// `decode_json` parsed into a `serde_json::Value` (number text preserved verbatim).
+pub fn decode_value(bytes: &[u8]) -> Result<Value, SaveError> {
+    serde_json::from_str(&decode_json(bytes)?).map_err(SaveError::Json)
+}
+
+// ---- Encoding --------------------------------------------------------------------------
+
+/// BOM + JSON text -> zlib stream at the game's compression level.
+pub fn deflate_json(json: &str) -> Vec<u8> {
+    let mut enc = ZlibEncoder::new(Vec::new(), Compression::new(ZLIB_LEVEL));
+    enc.write_all("\u{FEFF}".as_bytes()).expect("in-memory write");
+    enc.write_all(json.as_bytes()).expect("in-memory write");
+    enc.finish().expect("in-memory finish")
+}
+
+/// `u64 passwordIndex` + salt + AES-128-CBC/PKCS7 of the zlib bytes.
+pub fn encrypt_payload(zlib: &[u8], salt: &[u8; SALT_LEN]) -> Vec<u8> {
+    let (iv, key) = derive_iv_key(salt);
+    let body = Aes128CbcEnc::new(&key.into(), &iv.into()).encrypt_padded_vec_mut::<Pkcs7>(zlib);
+    let mut payload = Vec::with_capacity(8 + SALT_LEN + body.len());
+    payload.extend_from_slice(&PASSWORD_INDEX.to_le_bytes());
+    payload.extend_from_slice(salt);
+    payload.extend_from_slice(&body);
+    payload
+}
+
+pub fn random_salt() -> Result<[u8; SALT_LEN], SaveError> {
+    let mut salt = [0u8; SALT_LEN];
+    getrandom::fill(&mut salt).map_err(|e| SaveError::Random(e.to_string()))?;
+    Ok(salt)
+}
+
+/// Builds a complete encrypted profile file from a container header (copied verbatim from
+/// the live file) and JSON text.
+pub fn encode_profile_with_salt(header: &[u8], json: &str, salt: &[u8; SALT_LEN]) -> Vec<u8> {
+    let payload = encrypt_payload(&deflate_json(json), salt);
+    let mut out = Vec::with_capacity(header.len() + payload.len());
+    out.extend_from_slice(header);
+    out.extend_from_slice(&payload);
+    out
+}
+
+pub fn encode_profile(header: &[u8], json: &str) -> Result<Vec<u8>, SaveError> {
+    Ok(encode_profile_with_salt(header, json, &random_salt()?))
 }
 
 /// Auto-info about one entry in `savedMaps` (or a standalone `MapSaveData`).
@@ -290,10 +351,9 @@ pub fn humanize_map_name(name: &str) -> String {
     out
 }
 
-/// `Lych Elite T1 · Frozen Over · R59` / `Lotus Island · Odyssey · R20` / `Cubism · Easy Standard · R297`.
-pub fn summarize(m: &SavedMapInfo) -> String {
+/// [`summarize`] without the round: `Lych Elite T1 · Frozen Over` / `Cubism · Easy Standard`.
+pub fn describe(m: &SavedMapInfo) -> String {
     let map = humanize_map_name(&m.map);
-    let round = format!("R{}", m.round);
     if let Some(boss) = &m.boss {
         let mut head = boss.clone();
         if m.elite {
@@ -302,7 +362,7 @@ pub fn summarize(m: &SavedMapInfo) -> String {
         if let Some(t) = m.tier {
             head.push_str(&format!(" T{t}"));
         }
-        return format!("{head} · {map} · {round}");
+        return format!("{head} · {map}");
     }
     let kind = if m.game_type == 3 {
         "Odyssey".to_owned()
@@ -311,7 +371,12 @@ pub fn summarize(m: &SavedMapInfo) -> String {
     } else {
         m.mode.clone()
     };
-    format!("{map} · {kind} · {round}")
+    format!("{map} · {kind}")
+}
+
+/// `Lych Elite T1 · Frozen Over · R59` / `Lotus Island · Odyssey · R20` / `Cubism · Easy Standard · R297`.
+pub fn summarize(m: &SavedMapInfo) -> String {
+    format!("{} · R{}", describe(m), m.round)
 }
 
 /// Picks the most recently played entry: highest `gameId`, then highest `attemptId`.
@@ -356,11 +421,6 @@ pub fn map_save_has_game(bytes: &[u8]) -> Result<bool, SaveError> {
 #[cfg(test)]
 pub(crate) mod testutil {
     use super::*;
-    use aes::cipher::BlockEncryptMut;
-    use flate2::{write::ZlibEncoder, Compression};
-    use std::io::Write;
-
-    type Aes128CbcEnc = cbc::Encryptor<aes::Aes128>;
 
     fn write_prefixed_string(out: &mut Vec<u8>, s: &str) {
         let mut len = s.len();
@@ -393,22 +453,14 @@ pub(crate) mod testutil {
     }
 
     pub(crate) fn zlib(json: &str) -> Vec<u8> {
-        let mut enc = ZlibEncoder::new(Vec::new(), Compression::default());
-        enc.write_all("\u{FEFF}".as_bytes()).unwrap();
-        enc.write_all(json.as_bytes()).unwrap();
-        enc.finish().unwrap()
+        deflate_json(json)
     }
 
     pub(crate) fn encrypted_profile(json: &str) -> Vec<u8> {
-        let salt = [0x5A; 24];
-        let (iv, key) = derive_iv_key(&salt);
-        let body = Aes128CbcEnc::new(&key.into(), &iv.into())
-            .encrypt_padded_vec_mut::<Pkcs7>(&zlib(json));
-        let mut payload = Vec::new();
-        payload.extend_from_slice(&2u64.to_le_bytes());
-        payload.extend_from_slice(&salt);
-        payload.extend_from_slice(&body);
-        container("\"0123456789abcdef0123456789abcdef\"", &payload)
+        container(
+            "\"0123456789abcdef0123456789abcdef\"",
+            &encrypt_payload(&zlib(json), &[0x5A; SALT_LEN]),
+        )
     }
 
     /// A MapSaveData-shaped file wrapping `json` (use "null" for the idle state).
@@ -499,6 +551,41 @@ mod tests {
     }
 
     #[test]
+    fn encode_decode_round_trip() {
+        let original = encrypted_profile(PROFILE_JSON);
+        let c = parse_container(&original).unwrap();
+        assert_eq!(c.header_bytes.len(), 8 + c.header_len as usize);
+        let json = decode_json(&original).unwrap();
+
+        let rebuilt = encode_profile(c.header_bytes, &json).unwrap();
+        let rc = parse_container(&rebuilt).unwrap();
+        assert_eq!(rc.header_bytes, c.header_bytes);
+        assert_eq!(rc.save_count, c.save_count);
+        assert_eq!(rc.header_string, c.header_string);
+        assert_eq!(decode_json(&rebuilt).unwrap(), json);
+        assert_eq!(read_profile_info(&rebuilt).unwrap(), read_profile_info(&original).unwrap());
+
+        // Fresh salts each time; same salt reproduces the bytes exactly.
+        let again = encode_profile(c.header_bytes, &json).unwrap();
+        assert_ne!(again, rebuilt);
+        let fixed = encode_profile_with_salt(c.header_bytes, &json, &[0x5A; SALT_LEN]);
+        assert_eq!(fixed, original);
+        assert_eq!(&deflate_json("x")[..2], &[0x78, 0x5E], "game's zlib level");
+    }
+
+    #[test]
+    fn number_text_survives_round_trip() {
+        // The game writes C# "R" floats; arbitrary_precision keeps them byte-for-byte.
+        let json = r#"{"a":1.0,"b":506399.83894175291,"c":12345678901234567,"d":-0.0,"e":8042}"#;
+        let v: Value = serde_json::from_str(json).unwrap();
+        assert_eq!(serde_json::to_string(&v).unwrap(), json);
+        assert_eq!(as_i64(&v["a"]), Some(1));
+        assert_eq!(as_i64(&v["e"]), Some(8042));
+        let bytes = encode_profile_with_salt(&container("", &[]), json, &[1; SALT_LEN]);
+        assert_eq!(decode_json(&bytes).unwrap(), json);
+    }
+
+    #[test]
     fn corrupted_ciphertext_fails_cleanly() {
         let mut bytes = encrypted_profile(PROFILE_JSON);
         let n = bytes.len();
@@ -580,6 +667,18 @@ mod tests {
             assert!(info.game_version.is_some());
             assert!(info.rank.is_some());
             assert!(info.summary.is_some());
+            // Parse -> serialize -> encode -> decode must reproduce the game's text exactly.
+            let json = decode_json(&bytes).unwrap();
+            let v: Value = serde_json::from_str(&json).unwrap();
+            // Text is preserved except that C# writes exponents as `1E+08` and serde_json
+            // as `1e+08`; values are identical.
+            let out = serde_json::to_string(&v).unwrap();
+            assert_eq!(out.len(), json.len());
+            let bad = out.bytes().zip(json.bytes()).find(|(a, b)| a != b && !(*a == b'e' && *b == b'E'));
+            assert!(bad.is_none(), "unexpected round-trip difference: {bad:?}");
+            assert_eq!(serde_json::from_str::<Value>(&out).unwrap(), v);
+            let rebuilt = encode_profile(c.header_bytes, &json).unwrap();
+            assert_eq!(decode_json(&rebuilt).unwrap(), json);
         }
         if let Ok(bytes) = std::fs::read(dir.join("MapSaveData")) {
             assert_eq!(parse_container(&bytes).unwrap().header_len, 37);

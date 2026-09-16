@@ -206,6 +206,7 @@ dependencies = [
  "cbc",
  "chrono",
  "flate2",
+ "getrandom 0.3.4",
  "hmac",
  "pbkdf2",
  "serde",

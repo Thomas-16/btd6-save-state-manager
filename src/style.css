@@ -648,3 +648,149 @@ button {
     transition: none;
   }
 }
+
+/* ---- Restore (load) dialog ------------------------------------------------------------- */
+
+.modal.restore {
+  max-width: 640px;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+.rsections.off {
+  opacity: 0.45;
+}
+.rsec {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+.rsec > .label {
+  display: block;
+  margin-bottom: 4px;
+}
+.rsec .none {
+  color: var(--muted);
+  font-size: 12.5px;
+  padding: 6px 0;
+}
+.ritem {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  gap: 2px 10px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: default;
+}
+.ritem:last-child {
+  border-bottom: 0;
+}
+.ritem input[type="checkbox"] {
+  margin: 2px 0 0;
+  accent-color: var(--ink);
+}
+.ritem .nobox {
+  width: 18px;
+}
+.ritem .rmain {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.ritem .rlabel {
+  font-weight: 500;
+}
+.ritem .rlabel.small {
+  font-weight: 400;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.ritem .sub {
+  grid-column: 2;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.4;
+  user-select: text;
+}
+.ritem .sub .warn {
+  color: var(--warn);
+}
+.ritem .vals {
+  font-size: 12px;
+  color: var(--text-2);
+}
+.ritem.same,
+.ritem.kept,
+.ritem.off {
+  opacity: 0.5;
+}
+.ritem.rsub {
+  padding: 4px 0 6px 26px;
+  border-bottom: 0;
+}
+.ritem.rsub + .ritem:not(.rsub) {
+  border-top: 1px solid var(--line-soft);
+}
+.ritem.locked .rlabel::before {
+  content: "\1F512";
+  font-size: 11px;
+  margin-right: 6px;
+  opacity: 0.6;
+}
+.ritem .chip {
+  font-size: 11px;
+  padding: 1px 6px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  white-space: nowrap;
+}
+.ritem .chip.add {
+  color: var(--good);
+  border-color: var(--good);
+}
+.ritem .chip.replace {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+details.adv {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--line);
+}
+details.adv summary {
+  color: var(--muted);
+  font-size: 12px;
+  cursor: pointer;
+  list-style: none;
+}
+details.adv summary::before {
+  content: "▸ ";
+}
+details[open].adv summary::before {
+  content: "▾ ";
+}
+details.adv .ritem {
+  border-bottom: 0;
+}
+details.adv .warn {
+  margin: 4px 0 0 28px;
+}
+.modal-actions .rsum {
+  margin-right: auto;
+  color: var(--muted);
+  font-size: 12px;
+  align-self: center;
+}
+
+/* ---- Auto backup rows ------------------------------------------------------------------- */
+
+.row .sub .tag {
+  font-size: 10.5px;
+  padding: 0 5px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  color: var(--muted);
+}

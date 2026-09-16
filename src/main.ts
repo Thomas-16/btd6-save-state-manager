@@ -59,6 +59,7 @@ interface Meta {
   mapSaveDataPresent: boolean;
   mapSaveHasGame: boolean;
   readable: boolean;
+  auto: boolean;
   error?: string;
   lastRestoredAt?: string;
 }
@@ -73,6 +74,72 @@ interface RestoreReport {
   meta: Meta;
   profileWritten: string;
   mapSaveWritten: string | null;
+  mode: "merge" | "raw";
+  applied: string[];
+  backup?: Meta;
+}
+
+type ItemStatus = "add" | "replace" | "same" | "kept";
+
+interface EventProgress {
+  kind: "boss" | "odyssey";
+  snapshot: string | null;
+  live: string | null;
+  changed: boolean;
+}
+
+interface GameItem {
+  id: string;
+  keys: string[];
+  kind: "boss" | "odyssey" | "map";
+  status: ItemStatus;
+  label: string;
+  snapshot: SavedMapInfo | null;
+  live: SavedMapInfo | null;
+  snapshotContinueRound: number | null;
+  liveContinueRound: number | null;
+  differentGame: boolean;
+  event: EventProgress | null;
+  defaultChecked: boolean;
+}
+
+interface CategoryDiff {
+  id: string;
+  label: string;
+  changed: boolean;
+  changedKeys: string[];
+  summary: string;
+}
+
+interface LockedDiff {
+  key: string;
+  label: string;
+  snapshot: string;
+  live: string;
+  differs: boolean;
+}
+
+interface RestorePreview {
+  snapshotId: string;
+  snapshotName: string;
+  mergeAvailable: boolean;
+  mergeError: string | null;
+  games: GameItem[];
+  categories: CategoryDiff[];
+  locked: LockedDiff[];
+  identical: boolean;
+  snapshotGameVersion: string | null;
+  liveGameVersion: string | null;
+  mapSavePresent: boolean;
+  mapSaveHasGame: boolean;
+  mapSaveItem: string | null;
+}
+
+interface RestoreSelection {
+  raw: boolean;
+  games: string[];
+  events: string[];
+  categories: string[];
 }
 
 // ---- State -----------------------------------------------------------------------------
@@ -311,6 +378,198 @@ function nameDialog(defaultName: string, hint: string | null): Promise<{ name: s
   }).then(() => result);
 }
 
+/** Numeric strings get thousands separators; anything else is shown as-is. */
+function fmtValue(s: string): string {
+  return /^-?\d+(\.\d+)?$/.test(s) ? Number(s).toLocaleString() : s;
+}
+
+function statusChip(g: GameItem): string {
+  switch (g.status) {
+    case "add":
+      return "new";
+    case "replace":
+      return g.live ? `replaces R${g.live.round}` : "replaces";
+    case "same":
+      return "no change";
+    case "kept":
+      return "kept";
+  }
+}
+
+function gameDetail(g: GameItem): string {
+  const parts: string[] = [];
+  if (g.snapshot) {
+    parts.push(`R${g.snapshot.round}`);
+    if (g.snapshotContinueRound !== null) parts.push(`continue checkpoint R${g.snapshotContinueRound}`);
+  } else if (g.live) {
+    parts.push(`R${g.live.round}`);
+    parts.push("not in snapshot");
+  }
+  if (g.status === "replace" && g.live) parts.push(`now R${g.live.round}`);
+  return parts.join(" · ");
+}
+
+/**
+ * The load dialog: what differs between the snapshot and the live profile, with a checkbox
+ * per saved game, per event progress record and per category. Resolves with the selection
+ * or null when cancelled.
+ */
+function restoreDialog(meta: Meta, preview: RestorePreview): Promise<RestoreSelection | null> {
+  let result: RestoreSelection | null = null;
+  return modal((close) => {
+    const root = el("div", {});
+    root.append(el("h2", { text: `Load '${meta.name}'` }));
+
+    const mergeOk = preview.mergeAvailable;
+    const boxes: HTMLInputElement[] = [];
+    const checkbox = (attrs: Record<string, string | boolean | undefined>, checked: boolean, disabled: boolean) => {
+      const box = el("input", { type: "checkbox", ...attrs });
+      box.checked = checked;
+      box.disabled = disabled;
+      if (!disabled) boxes.push(box);
+      return box;
+    };
+    const row = (cls: string, box: HTMLInputElement | null, main: Node[], sub: (Node | string | null)[] = []) => {
+      const label = el("label", { class: `ritem ${cls}` });
+      label.append(box ?? el("span", { class: "nobox" }));
+      label.append(el("span", { class: "rmain" }, ...main));
+      for (const s of sub) if (s) label.append(el("span", { class: "sub" }, s));
+      return label;
+    };
+
+    const sections = el("div", { class: "rsections" });
+    if (!mergeOk) {
+      sections.append(el("p", { class: "warn", text: `Only a whole-file overwrite is possible: ${preview.mergeError ?? "profile could not be decoded"}.` }));
+    } else {
+      root.append(el("p", { class: "hint", text: "Ticked parts are taken from the snapshot; everything else stays as it is now. An automatic backup of the current save is taken first." }));
+      if (preview.snapshotGameVersion && preview.liveGameVersion && preview.snapshotGameVersion !== preview.liveGameVersion) {
+        root.append(el("p", { class: "hint", text: `Snapshot is from game version ${preview.snapshotGameVersion}, the current profile is ${preview.liveGameVersion}. The profile keeps its current version; each restored game carries its own.` }));
+      }
+      if (preview.identical) {
+        sections.append(el("p", { class: "hint", text: "Nothing selectable differs from the current profile." }));
+      }
+
+      // In-progress games, one row each, with the tied event progress as a sub-row.
+      const games = el("div", { class: "rsec" }, el("span", { class: "label", text: "In-progress games" }));
+      if (preview.games.length === 0) games.append(el("div", { class: "none", text: "Neither profile holds a game in progress." }));
+      for (const g of preview.games) {
+        const selectable = g.status === "add" || g.status === "replace";
+        const box = checkbox({ "data-kind": "game", "data-id": g.id }, g.defaultChecked, !selectable);
+        const sub: (Node | string | null)[] = [gameDetail(g) + (preview.mapSaveItem === g.id ? " · includes its mid-run autosave" : "")];
+        if (g.differentGame && g.live) {
+          sub.push(el("span", { class: "warn", text: `Replaces a different run: ${g.live.boss ? `${g.live.boss} · ` : ""}${humanizeMap(g.live.map)} R${g.live.round}` }));
+        }
+        games.append(row(g.status, box, [el("span", { class: "rlabel", text: g.label }), el("span", { class: `chip ${g.status}`, text: statusChip(g) })], sub));
+        if (g.event && (g.event.snapshot || g.event.live)) {
+          const ev = g.event;
+          const evBox = checkbox({ "data-kind": "event", "data-id": g.id }, ev.changed && g.defaultChecked, !ev.changed);
+          const text = ev.snapshot
+            ? `${ev.kind === "boss" ? "Event progress" : "Odyssey progress"}: ${ev.snapshot}${ev.live ? ` (now: ${ev.live})` : " (now: none)"}`
+            : `${ev.kind === "boss" ? "Event progress" : "Odyssey progress"}: none in snapshot (now: ${ev.live})`;
+          const evRow = row(`rsub${ev.changed ? "" : " same"}`, evBox, [el("span", { class: "rlabel small", text: text })]);
+          // Grey the sub-row when its selectable parent is unticked; a kept/unchanged run's
+          // event progress stands on its own.
+          if (ev.changed && selectable) {
+            const sync = () => evRow.classList.toggle("off", !box.checked);
+            box.addEventListener("change", sync);
+            sync();
+          }
+          games.append(evRow);
+        }
+      }
+      sections.append(games);
+
+      // Whole-key categories, unticked by default.
+      const cats = el("div", { class: "rsec" }, el("span", { class: "label", text: "Also take from snapshot" }));
+      for (const c of preview.categories) {
+        const box = checkbox({ "data-kind": "category", "data-id": c.id }, false, !c.changed);
+        cats.append(row(c.changed ? "" : "same", box, [el("span", { class: "rlabel", text: c.label })], [c.summary]));
+      }
+      sections.append(cats);
+
+      // Locked values: monkey money always, others only when they differ.
+      const locked = preview.locked.filter((l) => l.key === "monkeyMoney" || l.differs);
+      if (locked.length) {
+        const lk = el("div", { class: "rsec" }, el("span", { class: "label", text: "Always kept from the current profile" }));
+        for (const l of locked) {
+          lk.append(row("locked", null, [el("span", { class: "rlabel", text: l.label }), el("span", { class: "vals mono", text: `${fmtValue(l.live)} now · ${fmtValue(l.snapshot)} in snapshot` })]));
+        }
+        sections.append(lk);
+      }
+    }
+    root.append(sections);
+
+    // Advanced: the old whole-file copy.
+    const rawBox = el("input", { type: "checkbox", id: "raw-mode" });
+    rawBox.checked = !mergeOk;
+    rawBox.disabled = !mergeOk;
+    const rawWarn = el("p", { class: "warn", text: "Replaces every value, including monkey money, XP, trophies and settings." });
+    const versionWarn =
+      preview.snapshotGameVersion && preview.liveGameVersion && preview.snapshotGameVersion !== preview.liveGameVersion
+        ? el("p", { class: "warn", text: `Game version differs (${preview.snapshotGameVersion} vs ${preview.liveGameVersion}); a whole-file overwrite across versions may drop trophy store items.` })
+        : null;
+    if (!meta.readable) {
+      root.append(el("p", { class: "warn", text: "This snapshot could not be decrypted when it was taken. It may be corrupt." }));
+    }
+    const adv = el("details", { class: "adv", open: !mergeOk ? true : undefined },
+      el("summary", { text: "Advanced" }),
+      el("label", { class: "ritem" }, rawBox, el("span", { class: "rmain" }, el("span", { class: "rlabel", text: "Overwrite the entire file instead (raw copy of the snapshot)" }))),
+      rawWarn,
+      versionWarn,
+    );
+    root.append(adv);
+
+    const summary = el("span", { class: "rsum" });
+    const ok = el("button", { class: "btn danger" });
+    const cancel = el("button", { class: "btn", text: "Cancel" });
+    cancel.addEventListener("click", close);
+
+    const current = (): RestoreSelection => {
+      const sel: RestoreSelection = { raw: rawBox.checked, games: [], events: [], categories: [] };
+      if (sel.raw) return sel;
+      for (const b of boxes) {
+        if (!b.checked) continue;
+        const id = b.dataset.id!;
+        if (b.dataset.kind === "game") sel.games.push(id);
+        else if (b.dataset.kind === "event") sel.events.push(id);
+        else sel.categories.push(id);
+      }
+      return sel;
+    };
+    const refresh = () => {
+      const raw = rawBox.checked;
+      sections.classList.toggle("off", raw);
+      for (const b of boxes) b.disabled = raw;
+      rawWarn.hidden = !raw;
+      if (versionWarn) versionWarn.hidden = !raw;
+      const sel = current();
+      const n = sel.games.length + sel.events.length + sel.categories.length;
+      if (raw) {
+        summary.textContent = "Whole file from the snapshot · backup first";
+        ok.textContent = "Overwrite";
+        ok.disabled = false;
+      } else {
+        const bits: string[] = [];
+        if (sel.games.length) bits.push(`${sel.games.length} game${sel.games.length === 1 ? "" : "s"}`);
+        if (sel.events.length) bits.push(`${sel.events.length} event progress`);
+        if (sel.categories.length) bits.push(`${sel.categories.length} categor${sel.categories.length === 1 ? "y" : "ies"}`);
+        summary.textContent = n ? `Restores ${bits.join(" · ")} · backup first` : "Nothing selected";
+        ok.textContent = n ? `Apply ${n} change${n === 1 ? "" : "s"}` : "Apply";
+        ok.disabled = n === 0;
+      }
+    };
+    root.addEventListener("change", refresh);
+    refresh();
+    ok.addEventListener("click", () => {
+      result = current();
+      close();
+    });
+    setTimeout(() => cancel.focus(), 0);
+    root.append(el("div", { class: "modal-actions" }, summary, cancel, ok));
+    return root;
+  }, "wide restore").then(() => result);
+}
+
 function settingsDialog(): Promise<void> {
   if (settingsDialogOpen) return Promise.resolve();
   settingsDialogOpen = true;
@@ -438,34 +697,26 @@ async function loadSnapshot(meta: Meta) {
     toast("Close BTD6 first", "err");
     return;
   }
-  const warnings: string[] = [];
-  const liveVer = status?.live?.gameVersion ?? null;
-  if (liveVer && meta.gameVersion && liveVer !== meta.gameVersion) {
-    warnings.push(
-      `Game version differs: snapshot is ${meta.gameVersion}, current profile is ${liveVer}. ` +
-        "Restoring across versions may drop trophy store items.",
-    );
+  let preview: RestorePreview;
+  try {
+    preview = await invoke<RestorePreview>("preview_restore", { id: meta.id });
+  } catch (e) {
+    toast(`Cannot read snapshot: ${errText(e)}`, "err");
+    return;
   }
-  if (!meta.readable) {
-    warnings.push("This snapshot could not be decrypted when it was taken. It may be corrupt.");
-  }
-  const ok = await confirmDialog({
-    title: "Load snapshot",
-    message: `Overwrite your current BTD6 save with '${meta.name}'? This cannot be undone.`,
-    warnings,
-    okLabel: "Overwrite",
-    danger: true,
-  });
-  if (!ok) return;
+  const selection = await restoreDialog(meta, preview);
+  if (!selection) return;
   busy = true;
   renderTop();
   try {
-    const report = await invoke<RestoreReport>("restore_snapshot", { id: meta.id });
-    toast(`Loaded "${report.meta.name}"`);
+    const report = await invoke<RestoreReport>("restore_snapshot", { id: meta.id, selection });
+    const what = report.mode === "raw" ? "whole file" : `${report.applied.length} change${report.applied.length === 1 ? "" : "s"}`;
+    toast(`Loaded "${report.meta.name}" (${what}) · backup saved`);
     await refreshList();
     await refreshStatus();
   } catch (e) {
     toast(`Load failed: ${errText(e)}`, "err");
+    await refreshList();
   } finally {
     busy = false;
     renderTop();
@@ -615,6 +866,7 @@ function renderRow(meta: Meta): HTMLElement {
     const mismatch = liveVer !== null && liveVer !== meta.gameVersion;
     sub.push(el("span", { class: mismatch ? "warn" : undefined, text: mismatch ? `v${meta.gameVersion} · differs from live` : `v${meta.gameVersion}` }));
   }
+  if (meta.auto) sub.push(el("span", { class: "tag", text: "auto backup" }));
   if (!meta.readable) sub.push(el("span", { class: "bad", text: "unreadable" }));
   if (meta.mapSaveHasGame) sub.push(el("span", { text: "mid-run autosave" }));
   if (meta.lastRestoredAt) {
@@ -710,6 +962,9 @@ function renderDetail() {
   );
 
   const notices: HTMLElement[] = [];
+  if (meta.auto) {
+    notices.push(el("div", { class: "notice", text: "Taken automatically right before a snapshot was loaded. Load it to undo that restore." }));
+  }
   if (!meta.readable) {
     notices.push(el("div", { class: "notice bad", title: meta.error ?? "", text: "This snapshot could not be decrypted when it was taken. It may be corrupt." }));
   }
