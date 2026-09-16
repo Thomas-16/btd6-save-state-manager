@@ -178,22 +178,33 @@ Compared the 2026-09-12 snapshot with the live profile after two days of play.
 ### 3.3 Load (selective restore)
 
 1. Disabled while BTD6 is running.
-2. The app decrypts the snapshot's profile and the live profile and shows what differs:
-   - **In-progress games**: one checkbox per saved game. A boss run's `BB` + `BBCONT` is one
-     item; `OD` is one item. Status per item: *new* (only in the snapshot), *replaces Rn* (in
-     both, different), *no change*, *kept* (only in the live profile, never removed). Boss and
+2. The app decrypts the snapshot's profile and the live profile and shows what differs as a
+   two-sided sheet: a **Now** column (the live profile, with its game version) and a
+   **Snapshot** column (taken-at time and version). Each row carries a diff mark in the
+   gutter (`+` new, `~` replaces, `=` same, `·` not in snapshot, lock for always-kept). A
+   ticked row paints its outcome: the current value is struck through on a faint red, the
+   incoming value sits on faint green; an unticked row fades its snapshot side as "skipped".
+   Whole rows toggle on click; each group has all/none.
+   - **In-progress games**: one row per saved game. A boss run's `BB` + `BBCONT` is one
+     item; `OD` is one item. Status per item: *new* (only in the snapshot), *replaces* (in
+     both, different), *same*, *stays* (only in the live profile, never removed). Boss and
      odyssey items get a sub-row for their event progress (the matching `bossesEventData`
-     entry, or `odysseySaveData`). Games and their event progress are ticked by default.
-   - **Also take from snapshot**: one checkbox per category, unticked, with a one-line summary
-     of which keys differ: boss & odyssey records, map completion & medals, tower XP/unlocks/
-     knowledge, powers/insta-monkeys/trophy store, achievements, daily challenges/events/
-     seasons, settings/hotkeys/cosmetics, and "everything else" (stats, editors, any key a new
-     game version adds).
-   - **Always kept**: monkey money is shown with both values and cannot be selected. The same
-     lock applies to XP, rank, trophies, knowledge points and identity keys (`ownerID`,
-     wallets, `savedByGameVersion`, `timeStamp`, ...); those appear only when they differ.
-   - **Advanced**: "Overwrite the entire file instead" is the old byte-for-byte copy. It is the
-     only option when either profile cannot be decoded, and carries the cross-version warning.
+     entry, or `odysseySaveData`); unticking the run unticks its progress. Games and their
+     event progress are ticked by default.
+   - **Progress & records**: one row per category that differs, unticked, showing "current
+     values" against "N keys" with the changed key names under the category name. Identical
+     categories fold into one line under the group bar. Categories: boss & odyssey records,
+     map completion & medals, tower XP/unlocks/knowledge, powers/insta-monkeys/trophy store,
+     achievements, daily challenges/events/seasons, settings/hotkeys/cosmetics, and
+     "everything else" (stats, editors, any key a new game version adds).
+   - **Always kept as it is now**: monkey money is shown with both values and cannot be
+     selected. The same lock applies to XP, rank, trophies, knowledge points and identity keys
+     (`ownerID`, wallets, `savedByGameVersion`, `timeStamp`, ...); those appear only when they
+     differ.
+   - **Whole file**: a "Pick parts / Whole file" switch in the header. Whole file is the old
+     byte-for-byte copy; it greys the sheet, shows its consequences (monkey money and the rest
+     follow the snapshot) and turns the button into a red Overwrite. It is the only option when
+     either profile cannot be decoded, and carries the cross-version warning.
 3. Before writing anything, the live files are snapshotted automatically as
    "Auto backup before <name>" (flagged `auto` in `meta.json`). If that fails, nothing is loaded.
 4. Merge mode starts from the live JSON, replaces the selected keys/entries with the snapshot's,

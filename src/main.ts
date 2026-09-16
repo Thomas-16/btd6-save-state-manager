@@ -383,149 +383,257 @@ function fmtValue(s: string): string {
   return /^-?\d+(\.\d+)?$/.test(s) ? Number(s).toLocaleString() : s;
 }
 
-function statusChip(g: GameItem): string {
-  switch (g.status) {
-    case "add":
-      return "new";
-    case "replace":
-      return g.live ? `replaces R${g.live.round}` : "replaces";
-    case "same":
-      return "no change";
-    case "kept":
-      return "kept";
+/** `Lych Elite T3 · Frozen Over` / `Lotus Island · Odyssey` / `Cubism · Easy Standard`, mirrors `describe` in saveformat.rs. */
+function describeGame(m: SavedMapInfo): string {
+  const map = humanizeMap(m.map);
+  if (m.boss) {
+    let head = m.boss;
+    if (m.elite) head += " Elite";
+    if (m.tier !== undefined && m.tier !== null) head += ` T${m.tier}`;
+    return `${head} · ${map}`;
   }
+  const kind = m.gameType === 3 ? "Odyssey" : m.mode.toLowerCase() === "standard" && m.difficulty ? `${m.difficulty} ${m.mode}` : m.mode;
+  return `${map} · ${kind}`;
 }
 
-function gameDetail(g: GameItem): string {
-  const parts: string[] = [];
-  if (g.snapshot) {
-    parts.push(`R${g.snapshot.round}`);
-    if (g.snapshotContinueRound !== null) parts.push(`continue checkpoint R${g.snapshotContinueRound}`);
-  } else if (g.live) {
-    parts.push(`R${g.live.round}`);
-    parts.push("not in snapshot");
-  }
-  if (g.status === "replace" && g.live) parts.push(`now R${g.live.round}`);
-  return parts.join(" · ");
+/** `bossMedals` -> `boss medals`, mirrors `humanize_key` in restore.rs. */
+function humanizeKey(key: string): string {
+  return humanizeMap(key).toLowerCase();
+}
+
+function keyList(keys: string[]): string {
+  const shown = keys.slice(0, 4).map(humanizeKey);
+  return keys.length > 4 ? `${shown.join(", ")} +${keys.length - 4} more` : shown.join(", ");
 }
 
 /**
- * The load dialog: what differs between the snapshot and the live profile, with a checkbox
- * per saved game, per event progress record and per category. Resolves with the selection
- * or null when cancelled.
+ * The load dialog: a two-sided sheet, what the profile has now against what the snapshot
+ * would put there, one row per saved game, event progress record, category and locked value.
+ * A ticked row paints its outcome. Resolves with the selection or null when cancelled.
  */
 function restoreDialog(meta: Meta, preview: RestorePreview): Promise<RestoreSelection | null> {
   let result: RestoreSelection | null = null;
   return modal((close) => {
-    const root = el("div", {});
-    root.append(el("h2", { text: `Load '${meta.name}'` }));
-
+    const root = el("div", { class: "rroot" });
     const mergeOk = preview.mergeAvailable;
+    const versionDiffers =
+      !!preview.snapshotGameVersion && !!preview.liveGameVersion && preview.snapshotGameVersion !== preview.liveGameVersion;
+
+    // ---- Header: title and the mode switch --------------------------------------------
+    const pickRadio = el("input", { type: "radio", name: "rmode", value: "pick" });
+    const rawRadio = el("input", { type: "radio", name: "rmode", value: "raw" });
+    pickRadio.checked = mergeOk;
+    rawRadio.checked = !mergeOk;
+    pickRadio.disabled = !mergeOk;
+    const seg = el(
+      "div",
+      { class: "seg", role: "radiogroup", "aria-label": "Load mode" },
+      el("label", {}, pickRadio, "Pick parts"),
+      el("label", {}, rawRadio, el("span", { class: "rawword", text: "Whole file" })),
+    );
+    root.append(
+      el(
+        "div",
+        { class: "rhead" },
+        el("div", {}, el("h2", { text: `Load '${meta.name}'` }), el("p", { class: "hint", text: "A backup of the current save is taken first, so this can be undone." })),
+        seg,
+      ),
+    );
+    const body = el("div", { class: "rbody" });
+    root.append(body);
+    if (!meta.readable) {
+      body.append(el("p", { class: "warn", text: "This snapshot could not be decrypted when it was taken. It may be corrupt." }));
+    }
+
+    // ---- Whole-file note, shown only in raw mode --------------------------------------
+    const rawNote = el("div", { class: "raw-note" });
+    const mm = preview.locked.find((l) => l.key === "monkeyMoney");
+    const mmText = mm ? ` Monkey money goes ${fmtValue(mm.live)} → ${fmtValue(mm.snapshot)};` : "";
+    if (!mergeOk) {
+      rawNote.append(el("b", { text: "Only a whole-file overwrite is possible." }), ` ${preview.mergeError ?? "The profile could not be decoded"}. Every value will come from the snapshot, including monkey money and settings.`);
+    } else {
+      rawNote.append(el("b", { text: "Raw copy of the snapshot." }), ` Every value is replaced.${mmText} rank, trophies and settings follow. The sheet below is not consulted.`);
+    }
+    if (versionDiffers) {
+      rawNote.append(el("p", { class: "warn", text: `Game version differs (${preview.snapshotGameVersion} vs ${preview.liveGameVersion}); a whole-file overwrite across versions may drop trophy store items.` }));
+    }
+    body.append(rawNote);
+
+    // ---- The sheet ---------------------------------------------------------------------
     const boxes: HTMLInputElement[] = [];
-    const checkbox = (attrs: Record<string, string | boolean | undefined>, checked: boolean, disabled: boolean) => {
-      const box = el("input", { type: "checkbox", ...attrs });
+    const tbody = el("tbody");
+    const sheet = el("table", { class: "sheet" });
+    if (mergeOk) {
+      const side = (title: string, detail: string, cls: string) =>
+        el("th", { class: `side ${cls}` }, el("span", { class: "ct", text: title }), el("span", { class: "cs", text: detail }));
+      sheet.append(
+        el("colgroup", {}, el("col", { class: "g" }), el("col", { class: "b" }), el("col"), el("col", { class: "now" }), el("col", { class: "snap" })),
+        el(
+          "thead",
+          {},
+          el(
+            "tr",
+            {},
+            el("th"),
+            el("th"),
+            el("th", {}, el("span", { class: "ct", text: "Item" })),
+            side("Now", `your profile${preview.liveGameVersion ? ` · game ${preview.liveGameVersion}` : ""}`, "now"),
+            side("Snapshot", `${takenTime(meta.createdAt)}${preview.snapshotGameVersion ? ` · game ${preview.snapshotGameVersion}` : ""}`, versionDiffers ? "snap vdiff" : "snap"),
+          ),
+        ),
+        tbody,
+      );
+    }
+
+    const checkbox = (kind: "game" | "event" | "category", id: string, checked: boolean) => {
+      const box = el("input", { type: "checkbox", "data-kind": kind, "data-id": id });
       box.checked = checked;
-      box.disabled = disabled;
-      if (!disabled) boxes.push(box);
+      boxes.push(box);
       return box;
     };
-    const row = (cls: string, box: HTMLInputElement | null, main: Node[], sub: (Node | string | null)[] = []) => {
-      const label = el("label", { class: `ritem ${cls}` });
-      label.append(box ?? el("span", { class: "nobox" }));
-      label.append(el("span", { class: "rmain" }, ...main));
-      for (const s of sub) if (s) label.append(el("span", { class: "sub" }, s));
-      return label;
+    const cell = (cls: string, ...children: (Node | string | null)[]) => el("td", { class: cls }, ...children);
+    const value = (text: string, mono = false) => el("span", { class: mono ? "v mono" : "v", text });
+    const detail = (text: string | null) => (text ? el("span", { class: "d", text }) : null);
+    const pill = (text: string) => el("span", { class: "pill", text });
+    const round = (r: number) => value(`R${r}`, true);
+    const checkpoint = (r: number | null) => detail(r === null ? null : `continue checkpoint R${r}`);
+
+    interface Row {
+      cls: string;
+      glyph: string;
+      box: HTMLInputElement | null;
+      group?: string;
+      name: string;
+      sub?: boolean;
+      note?: (Node | string | null)[];
+      now: (Node | string | null)[];
+      snap: (Node | string | null)[];
+    }
+    const row = (r: Row) => {
+      const tr = el("tr", { class: `${r.box ? "r" : "q"} ${r.cls}${r.sub ? " sub" : ""}`, "data-g": r.group });
+      const item = cell("item", r.sub ? r.name : el("span", { class: "name", text: r.name }));
+      for (const n of r.note ?? []) if (n) item.append(typeof n === "string" ? el("span", { class: "note", text: n }) : n);
+      tr.append(cell("g", r.glyph), cell("b", r.box), item, cell("side now", ...r.now), cell("side snap", ...r.snap));
+      return tr;
+    };
+    const group = (label: string, key: string | null, fold: string | null) => {
+      const bar = el("div", { class: "bar" }, el("span", { class: "label", text: label }));
+      if (key) {
+        bar.append(
+          el("span", { class: "ops" }, el("button", { type: "button", class: "lnk", "data-all": key, text: "all" }), el("button", { type: "button", class: "lnk", "data-none": key, text: "none" })),
+        );
+      }
+      return el("tr", { class: "grp" }, el("td", { colspan: "5" }, bar, fold ? el("div", { class: "fold", text: fold }) : null));
     };
 
-    const sections = el("div", { class: "rsections" });
-    if (!mergeOk) {
-      sections.append(el("p", { class: "warn", text: `Only a whole-file overwrite is possible: ${preview.mergeError ?? "profile could not be decoded"}.` }));
-    } else {
-      root.append(el("p", { class: "hint", text: "Ticked parts are taken from the snapshot; everything else stays as it is now. An automatic backup of the current save is taken first." }));
-      if (preview.snapshotGameVersion && preview.liveGameVersion && preview.snapshotGameVersion !== preview.liveGameVersion) {
-        root.append(el("p", { class: "hint", text: `Snapshot is from game version ${preview.snapshotGameVersion}, the current profile is ${preview.liveGameVersion}. The profile keeps its current version; each restored game carries its own.` }));
-      }
+    if (mergeOk) {
       if (preview.identical) {
-        sections.append(el("p", { class: "hint", text: "Nothing selectable differs from the current profile." }));
+        body.append(el("p", { class: "hint empty", text: "Nothing selectable differs from your profile. Whole file is still available for a raw copy." }));
       }
 
-      // In-progress games, one row each, with the tied event progress as a sub-row.
-      const games = el("div", { class: "rsec" }, el("span", { class: "label", text: "In-progress games" }));
-      if (preview.games.length === 0) games.append(el("div", { class: "none", text: "Neither profile holds a game in progress." }));
+      // In-progress games, with the tied event progress as a sub-row.
+      const anyGame = preview.games.some((g) => g.status === "add" || g.status === "replace");
+      tbody.append(group("In-progress games", anyGame ? "games" : null, null));
+      if (preview.games.length === 0) {
+        tbody.append(el("tr", { class: "none" }, el("td", { colspan: "5", text: "Neither profile holds a game in progress." })));
+      }
       for (const g of preview.games) {
         const selectable = g.status === "add" || g.status === "replace";
-        const box = checkbox({ "data-kind": "game", "data-id": g.id }, g.defaultChecked, !selectable);
-        const sub: (Node | string | null)[] = [gameDetail(g) + (preview.mapSaveItem === g.id ? " · includes its mid-run autosave" : "")];
-        if (g.differentGame && g.live) {
-          sub.push(el("span", { class: "warn", text: `Replaces a different run: ${g.live.boss ? `${g.live.boss} · ` : ""}${humanizeMap(g.live.map)} R${g.live.round}` }));
+        const note: (Node | string | null)[] = [];
+        if (preview.mapSaveItem === g.id) note.push("Includes its mid-run autosave");
+        if (g.differentGame && g.live) note.push(el("span", { class: "note warn", text: `Replaces a different run: ${describeGame(g.live)} R${g.live.round}` }));
+        const snapSide = g.snapshot ? [round(g.snapshot.round), checkpoint(g.snapshotContinueRound)] : [value("not in snapshot")];
+        let nowSide: (Node | string | null)[] = [];
+        switch (g.status) {
+          case "add":
+            nowSide = [value("no game")];
+            break;
+          case "replace":
+            nowSide = [round(g.live!.round), g.differentGame ? detail(describeGame(g.live!)) : checkpoint(g.liveContinueRound)];
+            break;
+          case "same":
+            nowSide = [round(g.live!.round)];
+            snapSide.push(pill("same"));
+            break;
+          case "kept":
+            nowSide = [round(g.live!.round), pill("stays")];
+            break;
         }
-        games.append(row(g.status, box, [el("span", { class: "rlabel", text: g.label }), el("span", { class: `chip ${g.status}`, text: statusChip(g) })], sub));
+        const glyph = { add: "+", replace: "~", same: "=", kept: "·" }[g.status];
+        const cls = { add: "add", replace: "rep", same: "", kept: "" }[g.status];
+        const box = selectable ? checkbox("game", g.id, g.defaultChecked) : null;
+        tbody.append(row({ cls, glyph, box, group: "games", name: g.label, note, now: nowSide, snap: snapSide }));
+
         if (g.event && (g.event.snapshot || g.event.live)) {
           const ev = g.event;
-          const evBox = checkbox({ "data-kind": "event", "data-id": g.id }, ev.changed && g.defaultChecked, !ev.changed);
-          const text = ev.snapshot
-            ? `${ev.kind === "boss" ? "Event progress" : "Odyssey progress"}: ${ev.snapshot}${ev.live ? ` (now: ${ev.live})` : " (now: none)"}`
-            : `${ev.kind === "boss" ? "Event progress" : "Odyssey progress"}: none in snapshot (now: ${ev.live})`;
-          const evRow = row(`rsub${ev.changed ? "" : " same"}`, evBox, [el("span", { class: "rlabel small", text: text })]);
-          // Grey the sub-row when its selectable parent is unticked; a kept/unchanged run's
-          // event progress stands on its own.
-          if (ev.changed && selectable) {
-            const sync = () => evRow.classList.toggle("off", !box.checked);
-            box.addEventListener("change", sync);
-            sync();
+          const name = ev.kind === "boss" ? "Boss event progress" : "Odyssey progress";
+          const evBox = ev.changed ? checkbox("event", g.id, g.defaultChecked) : null;
+          const evRow = row({
+            cls: ev.changed ? "rep" : "",
+            glyph: "",
+            box: evBox,
+            group: "games",
+            sub: true,
+            name,
+            now: [value(ev.live ?? "none")],
+            snap: [value(ev.snapshot ?? "none in snapshot"), ev.changed ? null : pill("same")],
+          });
+          // An event row follows its run: unticking the run unticks its progress.
+          if (box && evBox) {
+            box.addEventListener("change", () => {
+              evBox.checked = box.checked;
+            });
           }
-          games.append(evRow);
+          tbody.append(evRow);
         }
       }
-      sections.append(games);
 
-      // Whole-key categories, unticked by default.
-      const cats = el("div", { class: "rsec" }, el("span", { class: "label", text: "Also take from snapshot" }));
-      for (const c of preview.categories) {
-        const box = checkbox({ "data-kind": "category", "data-id": c.id }, false, !c.changed);
-        cats.append(row(c.changed ? "" : "same", box, [el("span", { class: "rlabel", text: c.label })], [c.summary]));
+      // Whole-key categories, unticked by default; identical ones fold into the header.
+      const changed = preview.categories.filter((c) => c.changed);
+      const same = preview.categories.filter((c) => !c.changed);
+      const fold = same.length === 0 ? null : changed.length === 0 ? "All identical already" : `Identical already: ${same.map((c) => c.label).join(" · ")}`;
+      tbody.append(group("Progress & records", changed.length ? "cats" : null, fold));
+      for (const c of changed) {
+        const n = c.changedKeys.length;
+        tbody.append(
+          row({
+            cls: "rep",
+            glyph: "~",
+            box: checkbox("category", c.id, false),
+            group: "cats",
+            name: c.label,
+            note: [keyList(c.changedKeys)],
+            now: [value("current values")],
+            snap: [value(`${n} key${n === 1 ? "" : "s"}`)],
+          }),
+        );
       }
-      sections.append(cats);
 
       // Locked values: monkey money always, others only when they differ.
       const locked = preview.locked.filter((l) => l.key === "monkeyMoney" || l.differs);
       if (locked.length) {
-        const lk = el("div", { class: "rsec" }, el("span", { class: "label", text: "Always kept from the current profile" }));
+        tbody.append(group("Always kept as it is now", null, null));
         for (const l of locked) {
-          lk.append(row("locked", null, [el("span", { class: "rlabel", text: l.label }), el("span", { class: "vals mono", text: `${fmtValue(l.live)} now · ${fmtValue(l.snapshot)} in snapshot` })]));
+          tbody.append(row({ cls: "lock", glyph: "🔒", box: null, name: l.label, now: [value(fmtValue(l.live), true), pill("stays")], snap: [value(fmtValue(l.snapshot), true)] }));
         }
-        sections.append(lk);
       }
-    }
-    root.append(sections);
 
-    // Advanced: the old whole-file copy.
-    const rawBox = el("input", { type: "checkbox", id: "raw-mode" });
-    rawBox.checked = !mergeOk;
-    rawBox.disabled = !mergeOk;
-    const rawWarn = el("p", { class: "warn", text: "Replaces every value, including monkey money, XP, trophies and settings." });
-    const versionWarn =
-      preview.snapshotGameVersion && preview.liveGameVersion && preview.snapshotGameVersion !== preview.liveGameVersion
-        ? el("p", { class: "warn", text: `Game version differs (${preview.snapshotGameVersion} vs ${preview.liveGameVersion}); a whole-file overwrite across versions may drop trophy store items.` })
-        : null;
-    if (!meta.readable) {
-      root.append(el("p", { class: "warn", text: "This snapshot could not be decrypted when it was taken. It may be corrupt." }));
+      body.append(sheet);
+      const legend = el("div", { class: "legend" });
+      const key = (glyph: string, cls: string, text: string) => el("span", {}, el("span", { class: `k ${cls}`, text: glyph }), text);
+      const swatch = (cls: string, text: string) => el("span", {}, el("span", { class: `sw ${cls}` }), text);
+      legend.append(key("+", "a", "new"), key("~", "r", "replaces"), key("=", "", "same"), key("·", "", "not in snapshot"), swatch("in", "comes in"), swatch("out", "goes away"));
+      body.append(legend);
     }
-    const adv = el("details", { class: "adv", open: !mergeOk ? true : undefined },
-      el("summary", { text: "Advanced" }),
-      el("label", { class: "ritem" }, rawBox, el("span", { class: "rmain" }, el("span", { class: "rlabel", text: "Overwrite the entire file instead (raw copy of the snapshot)" }))),
-      rawWarn,
-      versionWarn,
-    );
-    root.append(adv);
 
+    // ---- Footer ------------------------------------------------------------------------
     const summary = el("span", { class: "rsum" });
-    const ok = el("button", { class: "btn danger" });
+    const ok = el("button", { class: "btn ink" });
     const cancel = el("button", { class: "btn", text: "Cancel" });
     cancel.addEventListener("click", close);
 
     const current = (): RestoreSelection => {
-      const sel: RestoreSelection = { raw: rawBox.checked, games: [], events: [], categories: [] };
+      const sel: RestoreSelection = { raw: rawRadio.checked, games: [], events: [], categories: [] };
       if (sel.raw) return sel;
       for (const b of boxes) {
         if (!b.checked) continue;
@@ -537,28 +645,64 @@ function restoreDialog(meta: Meta, preview: RestorePreview): Promise<RestoreSele
       return sel;
     };
     const refresh = () => {
-      const raw = rawBox.checked;
-      sections.classList.toggle("off", raw);
-      for (const b of boxes) b.disabled = raw;
-      rawWarn.hidden = !raw;
-      if (versionWarn) versionWarn.hidden = !raw;
-      const sel = current();
-      const n = sel.games.length + sel.events.length + sel.categories.length;
-      if (raw) {
-        summary.textContent = "Whole file from the snapshot · backup first";
-        ok.textContent = "Overwrite";
-        ok.disabled = false;
-      } else {
-        const bits: string[] = [];
-        if (sel.games.length) bits.push(`${sel.games.length} game${sel.games.length === 1 ? "" : "s"}`);
-        if (sel.events.length) bits.push(`${sel.events.length} event progress`);
-        if (sel.categories.length) bits.push(`${sel.categories.length} categor${sel.categories.length === 1 ? "y" : "ies"}`);
-        summary.textContent = n ? `Restores ${bits.join(" · ")} · backup first` : "Nothing selected";
-        ok.textContent = n ? `Apply ${n} change${n === 1 ? "" : "s"}` : "Apply";
-        ok.disabled = n === 0;
+      const raw = rawRadio.checked;
+      if (raw && !root.classList.contains("raw")) body.scrollTop = 0;
+      root.classList.toggle("raw", raw);
+      for (const b of boxes) {
+        b.disabled = raw;
+        b.closest("tr")?.classList.toggle("on", b.checked);
       }
+      if (raw) {
+        summary.replaceChildren(el("span", { class: "stat", text: "whole file" }), " backup first");
+        ok.textContent = "Overwrite";
+        ok.className = "btn danger";
+        ok.disabled = false;
+        return;
+      }
+      const sel = current();
+      let add = 0;
+      let rep = 0;
+      for (const b of boxes) {
+        if (b.checked && b.dataset.kind === "game") {
+          if (b.closest("tr")?.classList.contains("add")) add++;
+          else rep++;
+        }
+      }
+      const n = sel.games.length + sel.events.length + sel.categories.length;
+      if (n === 0) {
+        summary.textContent = preview.identical ? "Nothing to load" : "Nothing selected";
+      } else {
+        const stat = el("span", { class: "stat" });
+        if (add) stat.append(el("span", { class: "a", text: `+${add}` }));
+        if (rep) stat.append(el("span", { class: "r", text: `~${rep}` }));
+        const bits: string[] = [];
+        if (sel.events.length) bits.push(`${sel.events.length} progress`);
+        bits.push(sel.categories.length ? `${sel.categories.length} record set${sel.categories.length === 1 ? "" : "s"}` : "records untouched");
+        summary.replaceChildren(stat.childElementCount ? stat : "", `${bits.join(" · ")} · backup first`);
+      }
+      ok.textContent = n ? `Load ${n} part${n === 1 ? "" : "s"}` : "Load";
+      ok.className = "btn ink";
+      ok.disabled = n === 0;
     };
     root.addEventListener("change", refresh);
+    // Whole rows toggle their box; all/none set a whole group.
+    root.addEventListener("click", (ev) => {
+      const target = ev.target as HTMLElement;
+      const lnk = target.closest<HTMLElement>(".lnk");
+      if (lnk) {
+        const key = lnk.dataset.all ?? lnk.dataset.none;
+        const on = lnk.dataset.all !== undefined;
+        for (const b of boxes) if (!b.disabled && b.closest("tr")?.dataset.g === key) b.checked = on;
+        refresh();
+        return;
+      }
+      if (target.tagName === "INPUT" || target.tagName === "LABEL" || target.tagName === "BUTTON") return;
+      const tr = target.closest<HTMLTableRowElement>("tr.r");
+      const box = tr?.querySelector<HTMLInputElement>("input[type=checkbox]");
+      if (!box || box.disabled) return;
+      box.checked = !box.checked;
+      refresh();
+    });
     refresh();
     ok.addEventListener("click", () => {
       result = current();
@@ -567,7 +711,7 @@ function restoreDialog(meta: Meta, preview: RestorePreview): Promise<RestoreSele
     setTimeout(() => cancel.focus(), 0);
     root.append(el("div", { class: "modal-actions" }, summary, cancel, ok));
     return root;
-  }, "wide restore").then(() => result);
+  }, "restore").then(() => result);
 }
 
 function settingsDialog(): Promise<void> {

@@ -9,10 +9,12 @@ Design and investigation notes live in [SPEC.md](SPEC.md).
 1. Exit to the BTD6 main menu (or close the game).
 2. Click **Save current**, accept the suggested name (for example `Lych Elite T1 · Frozen Over · R59`), press Enter.
 3. Play. When you want to retry, close BTD6, pick the snapshot in the left column and click
-   **Load this snapshot**. A dialog lists what differs: each in-progress game (boss runs with
-   their event progress, odysseys, map saves) is a checkbox, ticked by default; other groups
-   (medals, tower XP, powers, achievements, events, settings, everything else) are unticked;
-   monkey money, XP, rank and trophies are always kept. Tick what you want and apply.
+   **Load this snapshot**. A two-sided sheet shows what your profile has *now* against what
+   the snapshot would put there, one row per in-progress game (boss runs with their event
+   progress, odysseys, map saves), ticked by default; record groups (medals, tower XP, powers,
+   achievements, events, settings, everything else) are unticked; monkey money, XP, rank and
+   trophies are always kept. A ticked row strikes out the current value and highlights the
+   incoming one. Tick what you want and press Load.
 
 The window is a two-column split: snapshots on the left, the selected one on the right with
 its rank, monkey money, game version, and the in-progress games it holds. The status chip in

@@ -13,6 +13,8 @@
   --good: #1e8f5a;
   --warn: #b4740a;
   --bad: #c8382c;
+  --good-bg: rgba(30, 143, 90, 0.09);
+  --bad-bg: rgba(200, 56, 44, 0.06);
   --focus: rgba(23, 25, 29, 0.25);
   --sans: "Instrument Sans Variable", "Segoe UI", system-ui, sans-serif;
   --mono: "JetBrains Mono Variable", Consolas, "Cascadia Mono", monospace;
@@ -650,139 +652,414 @@ button {
 }
 
 /* ---- Restore (load) dialog ------------------------------------------------------------- */
+/* A two-sided sheet: what the profile has now against what the snapshot would put there.
+   A ticked row paints its outcome: the current value is struck on faint red, the incoming
+   value sits on faint green. An unticked row fades its snapshot side. */
 
 .modal.restore {
-  max-width: 640px;
+  max-width: 680px;
+  padding: 0;
+  overflow: hidden;
+}
+.rroot {
+  display: flex;
+  flex-direction: column;
   max-height: calc(100vh - 48px);
+}
+.rroot .rbody {
+  flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
+  padding: 0 22px 16px;
 }
-.rsections.off {
-  opacity: 0.45;
-}
-.rsec {
-  margin-top: 14px;
-  padding-top: 10px;
+.rroot > .modal-actions {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 12px 22px 16px;
   border-top: 1px solid var(--line);
 }
-.rsec > .label {
-  display: block;
-  margin-bottom: 4px;
-}
-.rsec .none {
-  color: var(--muted);
-  font-size: 12.5px;
-  padding: 6px 0;
-}
-.ritem {
-  display: grid;
-  grid-template-columns: 18px 1fr;
-  gap: 2px 10px;
-  align-items: start;
-  padding: 7px 0;
-  border-bottom: 1px solid var(--line-soft);
-  cursor: default;
-}
-.ritem:last-child {
-  border-bottom: 0;
-}
-.ritem input[type="checkbox"] {
-  margin: 2px 0 0;
-  accent-color: var(--ink);
-}
-.ritem .nobox {
-  width: 18px;
-}
-.ritem .rmain {
+.rhead {
+  flex: 0 0 auto;
   display: flex;
-  align-items: center;
-  gap: 8px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   flex-wrap: wrap;
-  min-width: 0;
+  padding: 18px 22px 12px;
 }
-.ritem .rlabel {
+.rhead h2 {
+  margin: 0;
+}
+.rhead .hint {
+  margin: 2px 0 0;
+  font-size: 12px;
+}
+.rroot .empty {
+  margin: 8px 0 2px;
+}
+
+/* Mode switch */
+.seg {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.seg label {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 11px;
+  font-size: 12px;
   font-weight: 500;
-}
-.ritem .rlabel.small {
-  font-weight: 400;
-  font-size: 12.5px;
-  color: var(--text-2);
-}
-.ritem .sub {
-  grid-column: 2;
   color: var(--muted);
-  font-size: 12px;
-  line-height: 1.4;
-  user-select: text;
+  cursor: pointer;
 }
-.ritem .sub .warn {
-  color: var(--warn);
+.seg label + label {
+  border-left: 1px solid var(--line-strong);
 }
-.ritem .vals {
-  font-size: 12px;
-  color: var(--text-2);
+.seg input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
 }
-.ritem.same,
-.ritem.kept,
-.ritem.off {
+.seg label:has(input:checked) {
+  background: var(--ink);
+  color: #fff;
+}
+.seg label:has(input:checked) .rawword {
+  color: #ffd2cd;
+}
+.seg label:has(input:disabled) {
+  cursor: not-allowed;
   opacity: 0.5;
 }
-.ritem.rsub {
-  padding: 4px 0 6px 26px;
-  border-bottom: 0;
+.seg label:has(input:focus-visible) {
+  box-shadow: inset 0 0 0 2px var(--focus);
 }
-.ritem.rsub + .ritem:not(.rsub) {
-  border-top: 1px solid var(--line-soft);
+
+/* Whole-file note */
+.raw-note {
+  display: none;
+  margin: 0 0 8px;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border-radius: 6px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  user-select: text;
 }
-.ritem.locked .rlabel::before {
-  content: "\1F512";
+.raw-note b {
+  color: var(--bad);
+  font-weight: 600;
+}
+.raw-note .warn {
+  margin: 6px 0 0;
+}
+.rroot.raw .raw-note {
+  display: block;
+}
+.rroot.raw .sheet tbody,
+.rroot.raw .legend {
+  opacity: 0.35;
+  pointer-events: none;
+}
+
+/* The sheet */
+.sheet {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+}
+.sheet col.g {
+  width: 18px;
+}
+.sheet col.b {
+  width: 24px;
+}
+.sheet col.now {
+  width: 26%;
+}
+.sheet col.snap {
+  width: 27%;
+}
+.sheet thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--bg);
+  text-align: left;
+  vertical-align: bottom;
+  padding: 4px 8px 8px;
+  border-bottom: 2px solid var(--line-strong);
+}
+.sheet thead th.side {
+  padding-left: 10px;
+}
+.sheet thead .ct {
+  display: block;
   font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-2);
+  font-weight: 600;
+}
+.sheet thead .cs {
+  display: block;
+  margin-top: 1px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sheet thead th.snap .ct {
+  color: var(--ink);
+}
+.sheet thead th.vdiff .cs {
+  color: var(--warn);
+}
+.sheet td {
+  padding: 7px 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line-soft);
+  overflow-wrap: anywhere;
+}
+.sheet td.g {
+  padding-left: 0;
+  padding-right: 0;
+  text-align: center;
+  font: 500 13px/1.5 var(--mono);
+}
+.sheet td.b {
+  padding: 9px 0 0;
+}
+.sheet td.b input[type="checkbox"] {
+  margin: 0;
+  accent-color: var(--ink);
+}
+.sheet td.side {
+  padding-left: 10px;
+}
+.sheet td.side .v {
+  display: inline-block;
+}
+.sheet td.side .d {
+  display: block;
+  font-size: 11.5px;
+  color: var(--muted);
+}
+.sheet td.item .name {
+  font-weight: 500;
+}
+.sheet td.item .note {
+  display: block;
+  font-size: 12px;
+  color: var(--muted);
+}
+.sheet td.item .note.warn {
+  color: var(--warn);
+}
+.sheet tr.none td {
+  padding: 8px 0;
+  font-size: 12.5px;
+  color: var(--muted);
+}
+
+/* Selectable rows */
+.sheet tr.r {
+  cursor: pointer;
+}
+.sheet tr.r:hover td {
+  background: var(--bg-sunken);
+}
+.sheet tr.r.add td.g {
+  color: var(--good);
+}
+.sheet tr.r.rep td.g {
+  color: var(--warn);
+}
+.sheet tr.r.on td.side.now {
+  background: var(--bad-bg);
+}
+.sheet tr.r.on td.side.now .v {
+  text-decoration: line-through;
+  color: var(--muted);
+}
+.sheet tr.r.on.add td.side.now {
+  background: transparent;
+}
+.sheet tr.r.on.add td.side.now .v {
+  text-decoration: none;
+}
+.sheet tr.r.on.add:hover td.side.now {
+  background: var(--bg-sunken);
+}
+.sheet tr.r.on td.side.snap {
+  background: var(--good-bg);
+  font-weight: 500;
+}
+.sheet tr.r:not(.on) td.side.snap {
+  color: var(--muted);
+}
+.sheet tr.r:not(.on) td.side.snap .v::after {
+  content: " · skipped";
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* Event progress under its run */
+.sheet tr.sub td {
+  padding-top: 3px;
+  padding-bottom: 6px;
+}
+.sheet tr.sub td.item {
+  padding-left: 22px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+.sheet tr.sub td.item::before {
+  content: "└";
+  margin-left: -14px;
   margin-right: 6px;
+  color: var(--line-strong);
+}
+.sheet tr.sub td.side {
+  font-size: 12.5px;
+}
+
+/* Quiet rows: same, kept, locked */
+.sheet tr.q td {
+  color: var(--muted);
+}
+.sheet tr.q td.g {
+  color: var(--line-strong);
+}
+.sheet tr.q td.item .name {
+  font-weight: 400;
+  color: var(--text-2);
+}
+.sheet tr.q.lock td.g {
+  font-size: 10px;
   opacity: 0.6;
 }
-.ritem .chip {
-  font-size: 11px;
-  padding: 1px 6px;
+.sheet .pill {
+  margin-left: 6px;
+  padding: 0 6px;
   border: 1px solid var(--line-strong);
   border-radius: 999px;
-  color: var(--text-2);
+  font-size: 10.5px;
+  color: var(--muted);
+  white-space: nowrap;
+  vertical-align: 1px;
+}
+
+/* Group bars */
+.sheet tr.grp td {
+  padding: 16px 0 5px;
+  border-bottom: 1px solid var(--line);
+}
+.sheet tr.grp .bar {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+}
+.sheet tr.grp .label {
   white-space: nowrap;
 }
-.ritem .chip.add {
-  color: var(--good);
-  border-color: var(--good);
-}
-.ritem .chip.replace {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-details.adv {
-  margin-top: 14px;
-  padding-top: 10px;
-  border-top: 1px solid var(--line);
-}
-details.adv summary {
-  color: var(--muted);
+.sheet tr.grp .fold {
+  margin-top: 2px;
   font-size: 12px;
+  color: var(--muted);
+}
+.sheet tr.grp .ops {
+  font-size: 11.5px;
+  white-space: nowrap;
+}
+.lnk {
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  color: var(--muted);
   cursor: pointer;
-  list-style: none;
 }
-details.adv summary::before {
-  content: "▸ ";
+.lnk:hover {
+  color: var(--text);
 }
-details[open].adv summary::before {
-  content: "▾ ";
+.lnk:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--focus);
+  border-radius: 3px;
 }
-details.adv .ritem {
-  border-bottom: 0;
+.lnk + .lnk::before {
+  content: "·";
+  margin: 0 5px;
+  color: var(--line-strong);
 }
-details.adv .warn {
-  margin: 4px 0 0 28px;
-}
-.modal-actions .rsum {
-  margin-right: auto;
+
+/* Legend */
+.legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+  margin-top: 12px;
+  font-size: 11.5px;
   color: var(--muted);
+}
+.legend .k {
+  margin-right: 5px;
+  font: 500 12px var(--mono);
+}
+.legend .k.a {
+  color: var(--good);
+}
+.legend .k.r {
+  color: var(--warn);
+}
+.legend .sw {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  margin-right: 5px;
+  border-radius: 2px;
+  vertical-align: -1px;
+}
+.legend .sw.in {
+  background: var(--good-bg);
+  border: 1px solid rgba(30, 143, 90, 0.3);
+}
+.legend .sw.out {
+  background: var(--bad-bg);
+  border: 1px solid rgba(200, 56, 44, 0.25);
+}
+
+/* Footer */
+.modal-actions .rsum {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-right: auto;
   font-size: 12px;
-  align-self: center;
+  color: var(--muted);
+}
+.rsum .stat {
+  display: inline-flex;
+  gap: 8px;
+  font: 500 12px var(--mono);
+  color: var(--text-2);
+}
+.rsum .stat .a {
+  color: var(--good);
+}
+.rsum .stat .r {
+  color: var(--warn);
 }
 
 /* ---- Auto backup rows ------------------------------------------------------------------- */
